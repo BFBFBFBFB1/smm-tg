@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pricing import calculate_resale_price, detect_service_type
+from app.core.speed import detect_speed
 from app.db.models import Category, Service
 from app.db.redis import CacheKeys, cache_delete, cache_set
 from app.panel import PanelClient
@@ -68,6 +69,9 @@ async def sync_services_from_panel(session: AsyncSession) -> dict[str, int]:
             max_order = int(item.get("max") or min_order)
             panel_type = str(item.get("type") or "")
             description = item.get("description")
+            refill = bool(item.get("refill"))
+            cancel_allowed = bool(item.get("cancel"))
+            dripfeed = bool(item.get("dripfeed"))
         except (KeyError, TypeError, ValueError) as exc:
             logger.warning("Skip malformed panel service {}: {}", item, exc)
             continue
@@ -75,6 +79,7 @@ async def sync_services_from_panel(session: AsyncSession) -> dict[str, int]:
         seen_panel_ids.add(panel_id)
         service_type = detect_service_type(name, panel_type)
         resale_rate = calculate_resale_price(panel_rate, service_type)
+        speed_rank, _ = detect_speed(name)
         category = await _get_or_create_category(session, category_name)
 
         result = await session.execute(
@@ -94,6 +99,10 @@ async def sync_services_from_panel(session: AsyncSession) -> dict[str, int]:
                     min_order=min_order,
                     max_order=max_order,
                     description=description,
+                    refill=refill,
+                    cancel_allowed=cancel_allowed,
+                    dripfeed=dripfeed,
+                    speed_rank=speed_rank,
                     is_active=True,
                     last_synced_at=datetime.now(timezone.utc),
                 )
@@ -108,6 +117,10 @@ async def sync_services_from_panel(session: AsyncSession) -> dict[str, int]:
             service.min_order = min_order
             service.max_order = max_order
             service.description = description
+            service.refill = refill
+            service.cancel_allowed = cancel_allowed
+            service.dripfeed = dripfeed
+            service.speed_rank = speed_rank
             service.is_active = True
             service.last_synced_at = datetime.now(timezone.utc)
             updated += 1
@@ -159,6 +172,10 @@ async def _refresh_cache(session: AsyncSession) -> None:
             "min_order": s.min_order,
             "max_order": s.max_order,
             "description": s.description,
+            "refill": bool(getattr(s, "refill", False)),
+            "cancel_allowed": bool(getattr(s, "cancel_allowed", False)),
+            "dripfeed": bool(getattr(s, "dripfeed", False)),
+            "speed_rank": int(getattr(s, "speed_rank", 9) or 9),
         }
         all_services.append(payload)
         if s.category_id is not None:

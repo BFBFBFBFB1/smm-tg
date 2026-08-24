@@ -48,6 +48,12 @@ class PaymentMethod(StrEnum):
     CRYPTO = "crypto"
 
 
+class DiscountType(StrEnum):
+    PERCENT = "percent"
+    FIXED = "fixed"
+    BALANCE = "balance"  # credits user balance on redeem
+
+
 class Category(Base):
     __tablename__ = "categories"
 
@@ -73,6 +79,10 @@ class Service(Base):
     min_order: Mapped[int] = mapped_column(Integer, nullable=False)
     max_order: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    refill: Mapped[bool] = mapped_column(Boolean, default=False)
+    cancel_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
+    dripfeed: Mapped[bool] = mapped_column(Boolean, default=False)
+    speed_rank: Mapped[int] = mapped_column(Integer, default=9)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_synced_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -99,6 +109,7 @@ class User(Base):
         default=Decimal("0.00"),
     )
     broadcast_opt_out: Mapped[bool] = mapped_column(Boolean, default=False)
+    pending_promo_code: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -149,6 +160,12 @@ class Order(Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     purchase_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     sale_price: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    original_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    discount_amount: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4),
+        default=Decimal("0.00"),
+    )
+    promo_code_id: Mapped[int | None] = mapped_column(ForeignKey("promo_codes.id"))
     profit: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     status: Mapped[str] = mapped_column(
         String(50),
@@ -167,6 +184,48 @@ class Order(Base):
     user: Mapped[User] = relationship(back_populates="orders")
     service: Mapped[Service] = relationship(back_populates="orders")
     payment: Mapped["Payment | None"] = relationship(back_populates="order")
+    promo_code: Mapped["PromoCode | None"] = relationship(back_populates="orders")
+
+
+class PromoCode(Base):
+    __tablename__ = "promo_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    discount_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    discount_value: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    max_uses: Mapped[int | None] = mapped_column(Integer)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_per_user: Mapped[int] = mapped_column(Integer, default=1)
+    min_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    orders: Mapped[list["Order"]] = relationship(back_populates="promo_code")
+    redemptions: Mapped[list["PromoRedemption"]] = relationship(back_populates="promo")
+
+
+class PromoRedemption(Base):
+    __tablename__ = "promo_redemptions"
+    __table_args__ = (
+        UniqueConstraint("promo_id", "order_id", name="uq_promo_order"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    promo_id: Mapped[int] = mapped_column(ForeignKey("promo_codes.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"))
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    promo: Mapped[PromoCode] = relationship(back_populates="redemptions")
 
 
 class Payment(Base):

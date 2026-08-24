@@ -15,10 +15,13 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
         KeyboardButton(text="📦 Мои заказы"),
     )
     builder.row(
+        KeyboardButton(text="🎟 Промокод"),
         KeyboardButton(text="👥 Рефералы"),
-        KeyboardButton(text="ℹ️ Помощь"),
     )
-    builder.row(KeyboardButton(text="💬 Поддержка"))
+    builder.row(
+        KeyboardButton(text="ℹ️ Помощь"),
+        KeyboardButton(text="💬 Поддержка"),
+    )
     return builder.as_markup(resize_keyboard=True)
 
 
@@ -29,16 +32,27 @@ def support_kb(username: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def help_kb(username: str, *, offer_url: str, privacy_url: str) -> InlineKeyboardMarkup:
+    clean = username.lstrip("@")
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📄 Публичная оферта", url=offer_url)
+    builder.button(text="🔒 Политика конфиденциальности", url=privacy_url)
+    builder.button(text="Написать администратору", url=f"https://t.me/{clean}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def platforms_kb(platforms: list[dict]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔥 Популярные", callback_data="popular:0")
+    builder.button(text="📦 Наборы", callback_data="bundles")
     builder.button(text="🔎 Поиск", callback_data="search")
     for p in platforms:
         builder.button(
             text=f"{p['name']} ({p['count']})",
             callback_data=f"plat:{p['slug']}",
         )
-    builder.adjust(2)
+    builder.adjust(2, 1, 2)
     builder.row(InlineKeyboardButton(text="« Назад", callback_data="menu:home"))
     return builder.as_markup()
 
@@ -98,6 +112,8 @@ def services_kb(
     page_prefix: str,
     page: int = 0,
     per_page: int = 8,
+    sort: str | None = None,
+    sort_prefix: str | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     total = len(services)
@@ -113,30 +129,69 @@ def services_kb(
         )
     builder.adjust(1)
 
+    page_cb_prefix = f"{sort_prefix}:{sort}" if sort_prefix and sort else page_prefix
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="‹", callback_data=f"{page_prefix}:{page - 1}"))
+        nav.append(
+            InlineKeyboardButton(text="‹", callback_data=f"{page_cb_prefix}:{page - 1}")
+        )
     if start + per_page < total:
-        nav.append(InlineKeyboardButton(text="›", callback_data=f"{page_prefix}:{page + 1}"))
+        nav.append(
+            InlineKeyboardButton(text="›", callback_data=f"{page_cb_prefix}:{page + 1}")
+        )
     if nav:
         pages = max(1, (total + per_page - 1) // per_page)
-        mid = [InlineKeyboardButton(text=f"{page + 1}/{pages} · {total} шт", callback_data="noop")]
+        mid = InlineKeyboardButton(
+            text=f"{page + 1}/{pages} · {total} шт", callback_data="noop"
+        )
         if page > 0 and start + per_page < total:
-            builder.row(nav[0], mid[0], nav[1])
+            builder.row(nav[0], mid, nav[1])
         elif page > 0:
-            builder.row(nav[0], mid[0])
+            builder.row(nav[0], mid)
         else:
-            builder.row(mid[0], nav[0])
+            builder.row(mid, nav[0])
+
+    if sort_prefix:
+        price_l = "💰 Дешевле ✓" if sort == "price" else "💰 Дешевле"
+        speed_l = "⚡ Быстрее ✓" if sort == "speed" else "⚡ Быстрее"
+        pop_l = "🔥 Топ ✓" if sort == "popular" else "🔥 Топ"
+        builder.row(
+            InlineKeyboardButton(text=price_l, callback_data=f"{sort_prefix}:price:0"),
+            InlineKeyboardButton(text=speed_l, callback_data=f"{sort_prefix}:speed:0"),
+            InlineKeyboardButton(text=pop_l, callback_data=f"{sort_prefix}:popular:0"),
+        )
 
     builder.row(InlineKeyboardButton(text="« Назад", callback_data=back_callback))
     return builder.as_markup()
 
 
-def confirm_order_kb() -> InlineKeyboardMarkup:
+def bundles_kb(bundles: list[dict]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    for b in bundles:
+        builder.button(text=b["title"], callback_data=f"bundle:{b['id']}")
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="« К каталогу", callback_data="catalog"))
+    return builder.as_markup()
+
+
+def confirm_order_kb(
+    *,
+    offer_url: str,
+    privacy_url: str,
+    has_promo: bool = False,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if has_promo:
+        builder.button(text="🎟 Промокод применён", callback_data="promo:noop")
+    else:
+        builder.button(text="🎟 Ввести промокод", callback_data="promo:enter")
     builder.button(text="✅ Подтвердить", callback_data="order:confirm")
     builder.button(text="❌ Отмена", callback_data="order:cancel")
-    builder.adjust(2)
+    builder.adjust(1, 2)
+    builder.row(
+        InlineKeyboardButton(text="📄 Оферта", url=offer_url),
+        InlineKeyboardButton(text="🔒 Конфиденциальность", url=privacy_url),
+    )
     return builder.as_markup()
 
 
@@ -189,8 +244,13 @@ def payment_methods_kb(
     yookassa: bool,
     stars: bool,
     crypto: bool,
+    has_promo: bool = False,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    if has_promo:
+        builder.button(text="🎟 Промокод применён", callback_data="promo:noop")
+    else:
+        builder.button(text="🎟 Ввести промокод", callback_data="promo:enter")
     if balance_ok:
         builder.button(text="💳 С баланса", callback_data="pay:balance")
     if yookassa:
@@ -201,6 +261,46 @@ def payment_methods_kb(
         builder.button(text="🪙 Crypto Bot", callback_data="pay:crypto")
     builder.button(text="❌ Отмена", callback_data="order:cancel")
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_panel_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📊 Статистика", callback_data="adm:stats")
+    builder.button(text="💰 Баланс панели", callback_data="adm:panel_bal")
+    builder.button(text="🔄 Синхронизация", callback_data="adm:sync")
+    builder.button(text="🎟 Промокоды", callback_data="adm:promos")
+    builder.button(text="💵 Выдать баланс", callback_data="adm:give")
+    builder.button(text="💸 Снять баланс", callback_data="adm:take")
+    builder.button(text="🔎 Найти юзера", callback_data="adm:find")
+    builder.button(text="🚫 Бан / разбан", callback_data="adm:ban")
+    builder.button(text="📣 Рассылка", callback_data="adm:broadcast")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def admin_promos_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Создать", callback_data="adm:promo_create")
+    builder.button(text="📋 Список", callback_data="adm:promo_list")
+    builder.button(text="« Назад", callback_data="adm:home")
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+
+def admin_promo_type_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Процент %", callback_data="adm:promo_type:percent")
+    builder.button(text="Скидка $", callback_data="adm:promo_type:fixed")
+    builder.button(text="Баланс +$", callback_data="adm:promo_type:balance")
+    builder.button(text="« Отмена", callback_data="adm:promos")
+    builder.adjust(2, 1, 1)
+    return builder.as_markup()
+
+
+def admin_back_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="« В админку", callback_data="adm:home")
     return builder.as_markup()
 
 

@@ -58,8 +58,10 @@ async def mark_payment_paid(session: AsyncSession, payment: Payment) -> Payment:
         # Direct order payment → place on panel
         try:
             order = await place_order_on_panel(session, payment.order_id)
+            from app.services.promos import finalize_promo_redemption
             from app.services.referrals import award_referral_for_order
 
+            await finalize_promo_redemption(session, order, user)
             await award_referral_for_order(
                 session,
                 buyer=user,

@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     bot_token: str
     admin_ids: list[int] = Field(default_factory=list)
     support_username: str = "helpersmmtg"
+    # Legal documents (public offer + privacy policy)
+    offer_url: str = "https://cutt.ly/8rLOMWWC"
+    privacy_url: str = "https://cutt.ly/1rLlQZT0"
 
     # PostgreSQL
     postgres_host: str = "localhost"

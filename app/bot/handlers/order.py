@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
 from loguru import logger
@@ -22,7 +23,12 @@ router = Router(name="order")
 
 
 @router.message(OrderFSM.entering_link)
-async def process_link(message: Message, session: AsyncSession, state: FSMContext) -> None:
+async def process_link(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    db_user: User,
+) -> None:
     data = await state.get_data()
     service = await get_service(session, data["service_id"])
     if not service:
@@ -41,9 +47,20 @@ async def process_link(message: Message, session: AsyncSession, state: FSMContex
             return
 
     await state.update_data(link=link)
-    await state.set_state(OrderFSM.entering_quantity)
 
-    # If reorder — offer previous qty as default packages still shown
+    bundle_qty = data.get("bundle_qty")
+    if bundle_qty:
+        await state.update_data(bundle_qty=None)
+        await _apply_quantity(
+            message_or_callback=message,
+            session=session,
+            state=state,
+            quantity=int(bundle_qty),
+            db_user=db_user,
+        )
+        return
+
+    await state.set_state(OrderFSM.entering_quantity)
     await message.answer(
         f"Ссылка принята.\n\n"
         f"Выберите количество\n"
@@ -59,6 +76,7 @@ async def _apply_quantity(
     session: AsyncSession,
     state: FSMContext,
     quantity: int,
+    db_user: User | None = None,
 ) -> None:
     data = await state.get_data()
     service = await get_service(session, data["service_id"])
@@ -81,21 +99,78 @@ async def _apply_quantity(
         return
 
     total = calculate_order_price(Decimal(service.resale_rate), quantity)
-    await state.update_data(quantity=quantity, sale_price=str(total))
+    promo_code = data.get("promo_code")
+    promo_discount = data.get("promo_discount")
+
+    if not promo_code and db_user and db_user.pending_promo_code:
+        from app.services.promos import (
+            PromoError,
+            get_promo_by_code,
+            validate_promo_for_user,
+        )
+
+        promo = await get_promo_by_code(session, db_user.pending_promo_code)
+        if promo:
+            try:
+                promo_discount = str(
+                    await validate_promo_for_user(session, promo, db_user, total)
+                )
+                promo_code = promo.code
+            except PromoError:
+                promo_code = None
+                promo_discount = None
+
+    await state.update_data(
+        quantity=quantity,
+        sale_price=str(total),
+        promo_code=promo_code,
+        promo_discount=promo_discount,
+    )
     await state.set_state(OrderFSM.confirming)
-    text = (
-        "<b>Подтверждение заказа</b>\n\n"
-        f"Услуга: {service.name}\n"
-        f"Ссылка: {data['link']}\n"
-        f"Количество: <b>{quantity}</b>\n"
-        f"Цена за 1000: {format_rate(service.resale_rate)}\n"
-        f"Итого: <b>${total:.2f}</b>"
+    settings = get_settings()
+    text = _confirm_text(
+        service, data["link"], quantity, total, promo_code, promo_discount
+    )
+    kb = confirm_order_kb(
+        offer_url=settings.offer_url,
+        privacy_url=settings.privacy_url,
+        has_promo=bool(promo_code),
     )
     if isinstance(message_or_callback, CallbackQuery):
-        await message_or_callback.message.edit_text(text, reply_markup=confirm_order_kb())
+        await message_or_callback.message.edit_text(
+            text, reply_markup=kb, disable_web_page_preview=True
+        )
         await message_or_callback.answer()
     else:
-        await message_or_callback.answer(text, reply_markup=confirm_order_kb())
+        await message_or_callback.answer(
+            text, reply_markup=kb, disable_web_page_preview=True
+        )
+
+
+def _confirm_text(service, link: str, quantity: int, total: Decimal, promo_code, discount) -> str:
+    settings = get_settings()
+    lines = [
+        "<b>Подтверждение заказа</b>\n",
+        f"Услуга: {service.name}",
+        f"Ссылка: {link}",
+        f"Количество: <b>{quantity}</b>",
+        f"Цена за 1000: {format_rate(service.resale_rate)}",
+    ]
+    if promo_code and discount and Decimal(discount) > 0:
+        final = (Decimal(total) - Decimal(discount)).quantize(Decimal("0.01"))
+        lines.append(
+            f"Итого: <s>${Decimal(total):.2f}</s> → <b>${final:.2f}</b> "
+            f"(промо <code>{promo_code}</code> −${Decimal(discount):.2f})"
+        )
+    else:
+        lines.append(f"Итого: <b>${Decimal(total):.2f}</b>")
+    lines.append("")
+    lines.append(
+        "Нажимая «Подтвердить», вы соглашаетесь с "
+        f"<a href=\"{settings.offer_url}\">офертой</a> и "
+        f"<a href=\"{settings.privacy_url}\">политикой конфиденциальности</a>."
+    )
+    return "\n".join(lines)
 
 
 @router.callback_query(OrderFSM.entering_quantity, F.data.startswith("qty:"))
@@ -103,6 +178,7 @@ async def quantity_button(
     callback: CallbackQuery,
     session: AsyncSession,
     state: FSMContext,
+    db_user: User,
 ) -> None:
     raw = callback.data.split(":", 1)[1]
     if raw == "custom":
@@ -114,11 +190,17 @@ async def quantity_button(
         session=session,
         state=state,
         quantity=int(raw),
+        db_user=db_user,
     )
 
 
 @router.message(OrderFSM.entering_quantity)
-async def process_quantity(message: Message, session: AsyncSession, state: FSMContext) -> None:
+async def process_quantity(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    db_user: User,
+) -> None:
     raw = (message.text or "").replace(" ", "").replace(",", "")
     if not raw.isdigit():
         await message.answer("Введите целое число или выберите пакет кнопкой.")
@@ -128,6 +210,7 @@ async def process_quantity(message: Message, session: AsyncSession, state: FSMCo
         session=session,
         state=state,
         quantity=int(raw),
+        db_user=db_user,
     )
 
 
@@ -160,7 +243,20 @@ async def confirm_order(
         link=data["link"],
         quantity=int(data["quantity"]),
     )
-    await state.update_data(order_id=order.id)
+    promo_code = data.get("promo_code") or db_user.pending_promo_code
+    if promo_code:
+        from app.services.promos import PromoError, apply_promo_to_order, normalize_code
+
+        try:
+            order, _ = await apply_promo_to_order(session, order, db_user, promo_code)
+            if db_user.pending_promo_code and normalize_code(
+                db_user.pending_promo_code
+            ) == normalize_code(str(promo_code)):
+                db_user.pending_promo_code = None
+        except PromoError:
+            pass
+
+    await state.update_data(order_id=order.id, promo_code=None, promo_discount=None)
     await state.set_state(OrderFSM.choosing_payment)
 
     settings = get_settings()
@@ -169,17 +265,201 @@ async def confirm_order(
     balance_ok = Decimal(db_user.balance) >= Decimal(order.sale_price)
 
     await callback.message.edit_text(
-        f"Заказ <b>#{order.id}</b> на <b>${order.sale_price:.2f}</b>\n"
-        f"Ваш баланс: <b>${db_user.balance:.2f}</b>\n\n"
-        "Выберите способ оплаты:",
+        _payment_text(order, db_user),
         reply_markup=payment_methods_kb(
             balance_ok=balance_ok,
             yookassa=yk.enabled,
             stars=settings.stars_enabled,
             crypto=crypto.enabled,
+            has_promo=bool(order.promo_code_id),
         ),
+        disable_web_page_preview=True,
     )
     await callback.answer()
+
+
+def _payment_text(order, db_user: User) -> str:
+    lines = [
+        f"Заказ <b>#{order.id}</b>",
+    ]
+    if order.original_price and Decimal(order.discount_amount or 0) > 0:
+        lines.append(
+            f"Сумма: <s>${Decimal(order.original_price):.2f}</s> → "
+            f"<b>${Decimal(order.sale_price):.2f}</b> "
+            f"(−${Decimal(order.discount_amount):.2f})"
+        )
+    else:
+        lines.append(f"Сумма: <b>${Decimal(order.sale_price):.2f}</b>")
+    lines.append(f"Ваш баланс: <b>${db_user.balance:.2f}</b>")
+    lines.append("")
+    lines.append("Выберите способ оплаты:")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "promo:noop")
+async def promo_already(callback: CallbackQuery) -> None:
+    await callback.answer("Промокод уже применён", show_alert=True)
+
+
+@router.callback_query(F.data == "promo:enter")
+async def promo_enter(callback: CallbackQuery, state: FSMContext) -> None:
+    current = await state.get_state()
+    if current not in {OrderFSM.confirming.state, OrderFSM.choosing_payment.state}:
+        await callback.answer()
+        return
+    await state.update_data(promo_return_state=current)
+    await state.set_state(OrderFSM.entering_promo)
+    await callback.message.edit_text(
+        "Введите промокод одним сообщением.\n"
+        "Отмена: /cancel"
+    )
+    await callback.answer()
+
+
+@router.message(OrderFSM.entering_promo, Command("cancel"))
+async def promo_cancel(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    db_user: User,
+) -> None:
+    await _return_after_promo(message, session, state, db_user)
+
+
+@router.message(OrderFSM.entering_promo)
+async def promo_apply(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    db_user: User,
+) -> None:
+    from sqlalchemy import select
+    from app.db.models import Order
+    from app.services.promos import (
+        PromoError,
+        apply_promo_to_order,
+        get_promo_by_code,
+        validate_promo_for_user,
+    )
+
+    data = await state.get_data()
+    code = (message.text or "").strip()
+    order_id = data.get("order_id")
+
+    if order_id:
+        order = (
+            await session.execute(select(Order).where(Order.id == order_id))
+        ).scalar_one_or_none()
+        if not order or order.status != OrderStatus.AWAITING_PAYMENT:
+            await state.clear()
+            await message.answer("Заказ недоступен.", reply_markup=main_menu_kb())
+            return
+        try:
+            order, discount = await apply_promo_to_order(
+                session, order, db_user, code
+            )
+        except PromoError as exc:
+            await message.answer(f"{exc.message}\nПопробуйте другой код или /cancel")
+            return
+        await message.answer(f"Промокод применён: −${discount:.2f}")
+        await _show_payment_message(message, order, db_user, state)
+        return
+
+    # Before order created — store in FSM
+    base = Decimal(data.get("sale_price") or 0)
+    promo = await get_promo_by_code(session, code)
+    if not promo:
+        await message.answer("Промокод не найден.\nПопробуйте другой или /cancel")
+        return
+    try:
+        discount = await validate_promo_for_user(session, promo, db_user, base)
+    except PromoError as exc:
+        await message.answer(f"{exc.message}\nПопробуйте другой код или /cancel")
+        return
+
+    await state.update_data(promo_code=promo.code, promo_discount=str(discount))
+    await message.answer(f"Промокод <code>{promo.code}</code> применён: −${discount:.2f}")
+    await _show_confirm_message(message, session, state)
+
+
+async def _show_confirm_message(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    service = await get_service(session, data["service_id"])
+    if not service:
+        await state.clear()
+        await message.answer("Услуга недоступна.", reply_markup=main_menu_kb())
+        return
+    total = Decimal(data["sale_price"])
+    settings = get_settings()
+    await state.set_state(OrderFSM.confirming)
+    await message.answer(
+        _confirm_text(
+            service,
+            data["link"],
+            int(data["quantity"]),
+            total,
+            data.get("promo_code"),
+            data.get("promo_discount"),
+        ),
+        reply_markup=confirm_order_kb(
+            offer_url=settings.offer_url,
+            privacy_url=settings.privacy_url,
+            has_promo=bool(data.get("promo_code")),
+        ),
+        disable_web_page_preview=True,
+    )
+
+
+async def _show_payment_message(
+    message: Message,
+    order,
+    db_user: User,
+    state: FSMContext,
+) -> None:
+    settings = get_settings()
+    yk = YooKassaProvider()
+    crypto = CryptoBotProvider()
+    balance_ok = Decimal(db_user.balance) >= Decimal(order.sale_price)
+    await state.set_state(OrderFSM.choosing_payment)
+    await message.answer(
+        _payment_text(order, db_user),
+        reply_markup=payment_methods_kb(
+            balance_ok=balance_ok,
+            yookassa=yk.enabled,
+            stars=settings.stars_enabled,
+            crypto=crypto.enabled,
+            has_promo=bool(order.promo_code_id),
+        ),
+        disable_web_page_preview=True,
+    )
+
+
+async def _return_after_promo(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    db_user: User,
+) -> None:
+    from sqlalchemy import select
+    from app.db.models import Order
+
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    if order_id:
+        order = (
+            await session.execute(select(Order).where(Order.id == order_id))
+        ).scalar_one_or_none()
+        if not order:
+            await state.clear()
+            await message.answer("Заказ не найден.", reply_markup=main_menu_kb())
+            return
+        await _show_payment_message(message, order, db_user, state)
+        return
+    await _show_confirm_message(message, session, state)
 
 
 @router.callback_query(OrderFSM.choosing_payment, F.data == "pay:balance")

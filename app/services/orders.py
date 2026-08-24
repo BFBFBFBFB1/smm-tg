@@ -108,6 +108,7 @@ async def place_order_on_panel(session: AsyncSession, order_id: int) -> Order:
 
 
 async def pay_order_from_balance(session: AsyncSession, order: Order, user: User) -> Order:
+    from app.services.promos import finalize_promo_redemption
     from app.services.referrals import award_referral_for_order
     from app.services.users import credit_balance
 
@@ -117,6 +118,7 @@ async def pay_order_from_balance(session: AsyncSession, order: Order, user: User
         raise ValueError("Insufficient user balance")
     try:
         placed = await place_order_on_panel(session, order.id)
+        await finalize_promo_redemption(session, placed, user)
         await award_referral_for_order(session, buyer=user, order=placed)
         return placed
     except PanelAPIError:

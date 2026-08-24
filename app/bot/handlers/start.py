@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards import main_menu_kb, support_kb
+from app.bot.keyboards import help_kb, main_menu_kb, support_kb
 from app.core.config import get_settings
 from app.db.models import User
 from app.services.referrals import attach_referrer, parse_referrer_tg_id
@@ -20,7 +20,8 @@ WELCOME_CAPTION = (
     "🚀 <b>SMM-услуги</b> для роста в соцсетях\n"
     "Подписчики · Просмотры · Лайки и другие услуги\n\n"
     "Баланс: <b>${balance:.2f}</b>{extra}\n\n"
-    "Выберите действие в меню ниже."
+    "Выберите действие в меню ниже.\n"
+    "Документы — в «ℹ️ Помощь»."
 )
 
 
@@ -29,6 +30,7 @@ def _support_username() -> str:
 
 
 def help_text() -> str:
+    settings = get_settings()
     support = _support_username()
     return (
         "🤖 <b>SMM-услуги</b>\n\n"
@@ -38,7 +40,10 @@ def help_text() -> str:
         "2. Укажите ссылку и количество\n"
         "3. Оплатите\n"
         "4. Заказ запускается автоматически\n\n"
-        "Статус — в «Мои заказы». Приглашайте друзей в «Рефералы» и получайте бонус.\n\n"
+        "Статус — в «Мои заказы». Приглашайте друзей в «Рефералы» и получайте бонус.\n"
+        "Промокод — кнопка «🎟 Промокод» в меню (или при заказе).\n\n"
+        f"<a href=\"{settings.offer_url}\">Публичная оферта</a> · "
+        f"<a href=\"{settings.privacy_url}\">Политика конфиденциальности</a>\n\n"
         f"Поддержка: @{support}"
     )
 
@@ -79,8 +84,17 @@ async def cmd_start(
 @router.message(Command("help"))
 @router.message(F.text == "ℹ️ Помощь")
 async def cmd_help(message: Message) -> None:
+    settings = get_settings()
     support = _support_username()
-    await message.answer(help_text(), reply_markup=support_kb(support))
+    await message.answer(
+        help_text(),
+        reply_markup=help_kb(
+            support,
+            offer_url=settings.offer_url,
+            privacy_url=settings.privacy_url,
+        ),
+        disable_web_page_preview=True,
+    )
 
 
 @router.message(Command("support"))
