@@ -20,3 +20,6 @@ build/
 .vscode/
 .DS_Store
 docker-compose.override.yml
+wheels/
+smm-tg-deploy.tgz
+split/
