@@ -1,9 +1,9 @@
 import asyncio
 
-from aiogram import Bot
 from loguru import logger
 
 from app.core.config import get_settings
+from app.core.telegram import make_bot
 from app.db import async_session_factory
 from app.panel import PanelClient
 from app.services.orders import get_active_orders, update_order_from_panel
@@ -28,8 +28,7 @@ def _run(coro):
 
 
 async def _notify(tg_id: int, text: str) -> None:
-    settings = get_settings()
-    bot = Bot(token=settings.bot_token)
+    bot = make_bot()
     try:
         await bot.send_message(tg_id, text)
     except Exception as exc:

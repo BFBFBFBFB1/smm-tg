@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     local_mode: bool = False
     sqlite_path: str = "data/bot.db"
 
+    # HTTP or SOCKS5 proxy to reach api.telegram.org from blocked VPS
+    # Example: http://host.docker.internal:8118
+    telegram_proxy: str | None = None
+
     @field_validator("admin_ids", mode="before")
     @classmethod
     def parse_admin_ids(cls, value: object) -> list[int]:

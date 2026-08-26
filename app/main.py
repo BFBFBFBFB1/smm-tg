@@ -1,8 +1,6 @@
 import asyncio
 
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from loguru import logger
 
@@ -10,6 +8,7 @@ from app.bot.handlers import setup_routers
 from app.bot.middlewares import DbSessionMiddleware, UserMiddleware
 from app.core.config import get_settings
 from app.core.logging import setup_logging
+from app.core.telegram import make_bot
 from app.db import async_session_factory, init_db
 from app.db.redis import close_redis, get_redis, log_cache_backend
 from app.panel.sync import sync_services_from_panel
@@ -17,15 +16,20 @@ from app.worker_local import crypto_payments_loop, poll_loop, sync_loop
 
 
 async def on_startup(bot: Bot) -> None:
+    await bot.delete_webhook(drop_pending_updates=True)
     me = await bot.get_me()
     logger.info("Bot started as @{}", me.username)
-    try:
-        async with async_session_factory() as session:
-            stats = await sync_services_from_panel(session)
-            await session.commit()
-            logger.info("Initial services sync: {}", stats)
-    except Exception as exc:
-        logger.exception("Initial sync failed: {}", exc)
+
+    async def _sync_catalog() -> None:
+        try:
+            async with async_session_factory() as session:
+                stats = await sync_services_from_panel(session)
+                await session.commit()
+                logger.info("Initial services sync: {}", stats)
+        except Exception as exc:
+            logger.exception("Initial sync failed: {}", exc)
+
+    asyncio.create_task(_sync_catalog(), name="initial_catalog_sync")
 
 
 async def on_shutdown(bot: Bot) -> None:
@@ -49,10 +53,7 @@ async def main() -> None:
         storage = RedisStorage.from_url(settings.redis_url)
         get_redis()
 
-    bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    bot = make_bot()
     dp = Dispatcher(storage=storage)
 
     dp.message.middleware(DbSessionMiddleware())
@@ -77,12 +78,11 @@ async def main() -> None:
                 asyncio.create_task(poll_loop(bot, stop), name="poll_loop"),
             ]
         )
-    else:
-        bg_tasks.append(asyncio.create_task(poll_loop(bot, stop), name="poll_loop"))
+    # In Docker, Celery worker/beat already sync catalog and poll orders.
 
     logger.info("Starting polling...")
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, drop_pending_updates=True)
     finally:
         stop.set()
         for task in bg_tasks:
